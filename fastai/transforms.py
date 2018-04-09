@@ -61,6 +61,49 @@ def center_crop(im, min_sz=None):
     start_c = math.ceil((c-min_sz)/2)
     return crop(im, start_r, start_c, min_sz)
 
+def googlenet_resize(im, targ, min_area_frac, min_aspect_ratio, max_aspect_ratio, flip_hw_p, interpolation=cv2.INTER_AREA):
+    """ Randomly crops an image with an aspect ratio and returns a squared resized image of size targ
+    
+    References:
+    1. https://arxiv.org/pdf/1409.4842.pdf
+    2. https://arxiv.org/pdf/1802.07888.pdf
+    """
+    h,w,*_ = im.shape
+    area = h*w
+    for _ in range(10):
+        targetArea = random.uniform(min_area_frac, 1.0) * area
+        aspectR = random.uniform(min_aspect_ratio, max_aspect_ratio)
+        ww = int(np.sqrt(targetArea * aspectR) + 0.5)
+        hh = int(np.sqrt(targetArea / aspectR) + 0.5)
+        if flip_hw_p:
+            ww, hh = hh, ww
+        if hh <= h and ww <= w:
+            x1 = 0 if w == ww else random.randint(0, w - ww)
+            y1 = 0 if h == hh else random.randint(0, h - hh)
+            out = im[y1:y1 + hh, x1:x1 + ww]
+            out = cv2.resize(out, (targ, targ), interpolation=interpolation)
+            return out
+    out = scale_min(im, targ, interpolation=interpolation)
+    out = center_crop(out)
+    return out
+
+def cutout(im, n_holes, length):
+    *_,h,w = im.shape
+    mask = np.ones((h, w), np.int32)
+    for n in range(n_holes):
+        y = np.random.randint(h)
+        x = np.random.randint(w)
+
+        y1 = int(np.clip(y - length / 2, 0, h))
+        y2 = int(np.clip(y + length / 2, 0, h))
+        x1 = int(np.clip(x - length / 2, 0, w))
+        x2 = int(np.clip(x + length / 2, 0, w))
+        mask[y1: y2, x1: x2] = 0.
+    
+    mask = mask[:,:,None]
+    im = im * mask
+    return im
+
 def scale_to(x, ratio, targ): return max(math.floor(x*ratio), targ)
 
 def crop(im, r, c, sz): return im[r:r+sz, c:c+sz]
@@ -77,20 +120,21 @@ def rand0(s): return random.random()*(s*2)-s
 class TfmType(IntEnum):
     """ Type of transformation.
     Parameters
-        IntEnum: predefined types of tansformations
-            NO: is the default, y does not get transformed when x is transformed.
-            PIXEL: when x and y are images and should be transformed in the same way.
+        IntEnum: predefined types of transformations
+            NO:    the default, y does not get transformed when x is transformed.
+            PIXEL: x and y are images and should be transformed in the same way.
                    Example: image segmentation.
-            COORD: when y are coordinate or x in which case x and y have
-                   to be transformed accordingly.
+            COORD: y are coordinates (i.e bounding boxes)
+            CLASS: y are class labels (same behaviour as PIXEL, except no normalization)
     """
     NO = 1
     PIXEL = 2
     COORD = 3
+    CLASS = 4
 
 
 class Denormalize():
-    """ De-normalizes an image, returning it to original format. 
+    """ De-normalizes an image, returning it to original format.
     """
     def __init__(self, m, s):
         self.m=np.array(m, dtype=np.float32)
@@ -99,8 +143,7 @@ class Denormalize():
 
 
 class Normalize():
-    """ Normalizes an image.
-    """
+    """ Normalizes an image.  """
     def __init__(self, m, s, tfm_y=TfmType.NO):
         self.m=np.array(m, dtype=np.float32)
         self.s=np.array(s, dtype=np.float32)
@@ -108,15 +151,18 @@ class Normalize():
 
     def __call__(self, x, y=None):
         x = (x-self.m)/self.s
-        if self.tfm_y==TfmType.PIXEL and y is not None:
-            y = (y-self.m)/self.s
+        if self.tfm_y==TfmType.PIXEL and y is not None: y = (y-self.m)/self.s
         return x,y
 
-def channel_dim(x, y):
-    x = np.rollaxis(x, 2)
-    if isinstance(y,np.ndarray) and (len(y.shape)==3):
-        y = np.rollaxis(y, 2)
-    return x,y
+class ChannelOrder():
+    def __init__(self, tfm_y=TfmType.NO): self.tfm_y=tfm_y
+
+    def __call__(self, x, y):
+        x = np.rollaxis(x, 2)
+        #if isinstance(y,np.ndarray) and (len(y.shape)==3):
+        if self.tfm_y==TfmType.PIXEL: y = np.rollaxis(y, 2)
+        elif self.tfm_y==TfmType.CLASS: y = y[...,0]
+        return x,y
 
 
 def to_bb(YY, y):
@@ -155,11 +201,6 @@ class Transform():
 
     All other transforms should subclass it. All subclasses should override
     do_transform.
-    We have 3 types of transforms:
-       TfmType.NO: the target y is not transformed
-       TfmType.PIXEL: assumes x and y are images of the same (cols, rows) and trasforms
-           them with the same paramters.
-       TfmType.COORD: assumes that y are some coordinates in the image x.
 
     Arguments
     ---------
@@ -174,7 +215,7 @@ class Transform():
     def __call__(self, x, y):
         self.set_state()
         x,y = ((self.transform(x),y) if self.tfm_y==TfmType.NO
-                else self.transform(x,y) if self.tfm_y==TfmType.PIXEL
+                else self.transform(x,y) if self.tfm_y in (TfmType.PIXEL, TfmType.CLASS)
                 else self.transform_coord(x,y))
         return x, y
 
@@ -184,6 +225,7 @@ class Transform():
         x = self.do_transform(x,False)
         return (x, self.do_transform(y,True)) if y is not None else x
 
+    @abstractmethod
     def do_transform(self, x, is_y): raise NotImplementedError
 
 
@@ -218,7 +260,7 @@ class AddPadding(CoordTransform):
     ---------
         pad : int
             size of padding on top, bottom, left and right
-        mode: 
+        mode:
             type of cv2 padding modes. (e.g., constant, reflect, wrap, replicate. etc. )
     """
     def __init__(self, pad, mode=cv2.BORDER_REFLECT, tfm_y=TfmType.NO):
@@ -343,33 +385,6 @@ class RandomScale(CoordTransform):
         else   : return scale_min(x, self.store.new_sz,   cv2.INTER_AREA   )
 
 
-def random_px_rect(y, x):
-    """ Returns a 2D image of the size x with random points in a square box.
-
-    Arguments:
-        y (array): Contains the coordinates of the bounding box corners
-            y = [upper_row, left_col, lower_row, right_col]
-        x (array): image
-
-    Returns:
-        Y (array): A 2D array of size (x.shape[0], x.shape[1]) with pixes
-            on corners of the bounding box and random points in the boundary of the box.
-    """
-    rows0 = np.array([y[0], y[0], y[2], y[2]])
-    cols0 = np.array([y[1], y[3], y[1], y[3]])
-    n = [np.random.randint(10, 20) for i in range(4)]
-    rand_rows = np.hstack([np.random.uniform(y[0], y[2], size=n[i]) for i in range(2)])
-    fixed_cols = np.hstack([ y[j] * np.ones(n[i]) for i, j in zip(range(0,2), [1,3])])
-    rand_cols = np.hstack([np.random.uniform(y[1], y[3], size=n[i]) for i in range(2,4)])
-    fixed_rows = np.hstack([y[j] * np.ones(n[i]) for i, j in zip(range(2,4),[0,2])])
-    rows = np.hstack([rows0, rand_rows, fixed_rows]).astype(int)
-    cols = np.hstack([cols0, fixed_cols, rand_cols]).astype(int)
-    r,c,*_ = x.shape
-    Y = np.zeros((r, c))
-    Y[rows, cols] = 1
-    return Y
-
-
 class RandomRotate(CoordTransform):
     """ Rotates images and (optionally) target y.
 
@@ -383,20 +398,25 @@ class RandomRotate(CoordTransform):
     """
     def __init__(self, deg, p=0.75, mode=cv2.BORDER_REFLECT, tfm_y=TfmType.NO):
         super().__init__(tfm_y)
-        self.deg,self.mode,self.p = deg,mode,p
+        self.deg,self.p = deg,p
+        if tfm_y == TfmType.COORD or tfm_y == TfmType.CLASS:
+            self.modes = (mode,cv2.BORDER_CONSTANT)
+        else:
+            self.modes = (mode,mode)
 
     def set_state(self):
         self.store.rdeg = rand0(self.deg)
         self.store.rp = random.random()<self.p
 
     def do_transform(self, x, is_y):
-        if self.store.rp: x = rotate_cv(x, self.store.rdeg, mode=self.mode,
+        if self.store.rp: x = rotate_cv(x, self.store.rdeg, 
+                mode= self.modes[1] if is_y else self.modes[0],
                 interpolation=cv2.INTER_NEAREST if is_y else cv2.INTER_AREA)
         return x
 
 
 class RandomDihedral(CoordTransform):
-    """ 
+    """
     Rotates images by random multiples of 90 degrees and/or reflection.
     Please reference D8(dihedral group of order eight), the group of all symmetries of the square.
     """
@@ -408,12 +428,14 @@ class RandomDihedral(CoordTransform):
         x = np.rot90(x, self.store.rot_times)
         return np.fliplr(x).copy() if self.store.do_flip else x
 
-class RandomFlip(CoordTransform):
-    def set_state(self):
-        self.store.do_flip = random.random()<0.5
 
-    def do_transform(self, x, is_y):
-        return np.fliplr(x).copy() if self.store.do_flip else x
+class RandomFlip(CoordTransform):
+    def __init__(self, tfm_y=TfmType.NO, p=0.5):
+        super().__init__(tfm_y=tfm_y)
+        self.p=p
+
+    def set_state(self): self.store.do_flip = random.random()<self.p
+    def do_transform(self, x, is_y): return np.fliplr(x).copy() if self.store.do_flip else x
 
 
 class RandomLighting(Transform):
@@ -431,30 +453,42 @@ class RandomLighting(Transform):
         c = -1/(c-1) if c<0 else c+1
         x = lighting(x, b, c)
         return x
-    
+
 class RandomRotateZoom(CoordTransform):
-    def __init__(self, deg, zoom, stretch, mode=cv2.BORDER_REFLECT, tfm_y=TfmType.NO):
+    """ 
+        Selects between a rotate, zoom, stretch, or no transform.
+        Arguments:
+            deg - maximum degrees of rotation.
+            zoom - maximum fraction of zoom.
+            stretch - maximum fraction of stretch.
+            ps - probabilities for each transform. List of length 4. The order for these probabilities is as listed respectively (4th probability is 'no transform'.
+    """
+    def __init__(self, deg, zoom, stretch, ps=None, mode=cv2.BORDER_REFLECT, tfm_y=TfmType.NO):
         super().__init__(tfm_y)
-        self.rotate,self.zoom = RandomRotate(deg, p=1, mode=mode, tfm_y=tfm_y), RandomZoom(zoom, tfm_y=tfm_y)
-        self.stretch, self.pass_t = RandomStretch(stretch, tfm_y=tfm_y), PassThru(tfm_y=tfm_y)
-    
+        if ps is None: ps = [0.25,0.25,0.25,0.25]
+        assert len(ps) == 4, 'does not have 4 probabilities for p, it has %d' % len(ps)
+        self.transforms = RandomRotate(deg, p=1, mode=mode, tfm_y=tfm_y), RandomZoom(zoom, tfm_y=tfm_y), RandomStretch(stretch,tfm_y=tfm_y)
+        self.pass_t = PassThru()
+        self.cum_ps = np.cumsum(ps)
+        assert self.cum_ps[3]==1, 'probabilites do not sum to 1; they sum to %d' % self.cum_ps[3]
+
     def set_state(self):
-        choice = random.randint(0,3)
-        if choice==0: a = self.pass_t
-        elif choice==1: a = self.rotate
-        elif choice==2: a = self.zoom
-        elif choice==3: a = self.stretch
-        self.store.trans = a
-    
+        self.store.choice = self.cum_ps[3]*random.random()
+        for i in range(len(self.transforms)):
+            if self.store.choice < self.cum_ps[i]:
+                self.store.trans = self.transforms[i]
+                return
+        self.store.trans = self.pass_t
+
     def __call__(self, x, y):
         self.set_state()
         return self.store.trans(x, y)
-    
+
 class RandomZoom(CoordTransform):
     def __init__(self, zoom_max, zoom_min=0, mode=cv2.BORDER_REFLECT, tfm_y=TfmType.NO):
         super().__init__(tfm_y)
         self.zoom_max, self.zoom_min = zoom_max, zoom_min
-    
+
     def set_state(self):
         self.store.zoom = self.zoom_min+(self.zoom_max-self.zoom_min)*random.random()
 
@@ -465,20 +499,20 @@ class RandomStretch(CoordTransform):
     def __init__(self, max_stretch, tfm_y=TfmType.NO):
         super().__init__(tfm_y)
         self.max_stretch = max_stretch
-    
+
     def set_state(self):
         self.store.stretch = self.max_stretch*random.random()
         self.store.stretch_dir = random.randint(0,1)
 
     def do_transform(self, x, is_y):
         if self.store.stretch_dir==0: x = stretch_cv(x, self.store.stretch, 0)
-        else:             x = stretch_cv(x, 0, self.store.stretch)
+        else:                         x = stretch_cv(x, 0, self.store.stretch)
         return x
-    
+
 class PassThru(CoordTransform):
     def do_transform(self, x, is_y):
         return x
-    
+
 class RandomBlur(Transform):
     """
     Adds a gaussian blur to the image at chance.
@@ -502,6 +536,51 @@ class RandomBlur(Transform):
     def do_transform(self, x, is_y):
         return cv2.GaussianBlur(src=x, ksize=self.store.kernel, sigmaX=0) if self.apply_transform else x
 
+class Cutout(Transform):
+    def __init__(self, n_holes, length, tfm_y=TfmType.NO):
+        super().__init__(tfm_y)
+        self.n_holes,self.length = n_holes,length
+
+    def do_transform(self, img, is_y):
+        return cutout(img, self.n_holes, self.length)
+
+class GoogleNetResize(CoordTransform):
+    """ Randomly crops an image with an aspect ratio and returns a squared resized image of size targ 
+    
+    Arguments:
+        targ_sz: int
+            target size
+        min_area_frac: float < 1.0
+            minimum area of the original image for cropping
+        min_aspect_ratio : float
+            minimum aspect ratio
+        max_aspect_ratio : float
+            maximum aspect ratio
+        flip_hw_p : float
+            probability for flipping magnitudes of height and width
+        tfm_y: TfmType
+            type of y transform
+    """
+    
+    def __init__(self, targ_sz, 
+                 min_area_frac=0.08, min_aspect_ratio=0.75, max_aspect_ratio=1.333, flip_hw_p=0.5,
+                 tfm_y=TfmType.NO, sz_y=None):
+        super().__init__(tfm_y)
+        self.targ_sz, self.tfm_y, self.sz_y = targ_sz, tfm_y, sz_y
+        self.min_area_frac, self.min_aspect_ratio, self.max_aspect_ratio, self.flip_hw_p = min_area_frac, min_aspect_ratio, max_aspect_ratio, flip_hw_p
+    
+    def set_state(self):
+        # if self.random_state: random.seed(self.random_state)
+        self.store.fp = random.random()<self.flip_hw_p
+
+    def do_transform(self, x, is_y):
+        sz = self.sz_y if is_y else self.targ_sz
+        if is_y:
+            interpolation = cv2.INTER_NEAREST if self.tfm_y in (TfmType.COORD, TfmType.CLASS) else cv2.INTER_AREA
+        else:
+            interpolation = cv2.INTER_AREA
+        return googlenet_resize(x, sz, self.min_area_frac, self.min_aspect_ratio, self.max_aspect_ratio, self.store.fp, interpolation=interpolation)
+
 
 def compose(im, y, fns):
     """ apply a collection of transformation functions fns to images
@@ -518,51 +597,59 @@ class CropType(IntEnum):
     RANDOM = 1
     CENTER = 2
     NO = 3
+    GOOGLENET = 4
 
-crop_fn_lu = {CropType.RANDOM: RandomCrop, CropType.CENTER: CenterCrop, CropType.NO: NoCrop}
+crop_fn_lu = {CropType.RANDOM: RandomCrop, CropType.CENTER: CenterCrop, CropType.NO: NoCrop, CropType.GOOGLENET: GoogleNetResize}
 
 class Transforms():
-    def __init__(self, sz, tfms, normalizer, denorm, crop_type=CropType.CENTER, tfm_y=TfmType.NO, sz_y=None):
+    def __init__(self, sz, tfms, normalizer, denorm, crop_type=CropType.CENTER,
+                 min_area_frac=0.08, min_aspect_ratio=0.75, max_aspect_ratio=1.333, flip_hw_p=0.5,
+                 tfm_y=TfmType.NO, sz_y=None):
         if sz_y is None: sz_y = sz
         self.sz,self.denorm,self.norm,self.sz_y = sz,denorm,normalizer,sz_y
-        crop_tfm = crop_fn_lu[crop_type](sz, tfm_y, sz_y)
-        self.tfms = tfms + [crop_tfm, normalizer, channel_dim]
+        if crop_type==CropType.GOOGLENET:
+            crop_tfm = crop_fn_lu[crop_type](sz, min_area_frac=min_area_frac, min_aspect_ratio=min_aspect_ratio, max_aspect_ratio=max_aspect_ratio, flip_hw_p=flip_hw_p, tfm_y=tfm_y, sz_y=sz_y)
+        else:
+            crop_tfm = crop_fn_lu[crop_type](sz, tfm_y, sz_y)
+        self.tfms = tfms + [crop_tfm, normalizer, ChannelOrder(tfm_y)]
     def __call__(self, im, y=None): return compose(im, y, self.tfms)
+    def __repr__(self): return str(self.tfms)
 
 
 def image_gen(normalizer, denorm, sz, tfms=None, max_zoom=None, pad=0, crop_type=None,
+              min_area_frac=0.08, min_aspect_ratio=0.75, max_aspect_ratio=1.333, flip_hw_p=0.5,
               tfm_y=None, sz_y=None, pad_mode=cv2.BORDER_REFLECT):
     """
     Generate a standard set of transformations
-    
+
     Arguments
     ---------
-     normalizer : 
-         image normalizing funciton
+     normalizer :
+         image normalizing function
      denorm :
          image denormalizing function
-     sz : 
-         size, sz_y = sz if not specified.  
-     tfms : 
+     sz :
+         size, sz_y = sz if not specified.
+     tfms :
          iterable collection of transformation functions
      max_zoom : float,
          maximum zoom
      pad : int,
-         padding on top, left, right and bottom 
-     crop_type : 
+         padding on top, left, right and bottom
+     crop_type :
          crop type
-     tfm_y : 
+     tfm_y :
          y axis specific transformations
-     sz_y : 
+     sz_y :
          y size, height
-     pad_mode : 
-         cv2 padding style: repeat, reflect, etc. 
-    
-    Returns 
+     pad_mode :
+         cv2 padding style: repeat, reflect, etc.
+
+    Returns
     -------
-     type : ``Transforms`` 
-         transformer for specified image operations. 
-         
+     type : ``Transforms``
+         transformer for specified image operations.
+
     See Also
     --------
      Transforms: the transformer object returned by this function
@@ -574,11 +661,14 @@ def image_gen(normalizer, denorm, sz, tfms=None, max_zoom=None, pad=0, crop_type
     scale = [RandomScale(sz, max_zoom, tfm_y=tfm_y, sz_y=sz_y) if max_zoom is not None
              else Scale(sz, tfm_y, sz_y=sz_y)]
     if pad: scale.append(AddPadding(pad, mode=pad_mode))
+    if crop_type!=CropType.GOOGLENET: tfms=scale+tfms
     #if (max_zoom is not None or pad!=0) and crop_type is None: crop_type = CropType.RANDOM
-    return Transforms(sz, scale + tfms, normalizer, denorm, crop_type, tfm_y=tfm_y, sz_y=sz_y)
+    return Transforms(sz, tfms, normalizer, denorm, crop_type, 
+                      min_area_frac=min_area_frac, min_aspect_ratio=min_aspect_ratio, max_aspect_ratio=max_aspect_ratio, flip_hw_p=flip_hw_p,
+                      tfm_y=tfm_y, sz_y=sz_y)
 
-def noop(x): 
-    """dummy function for do-nothing. 
+def noop(x):
+    """dummy function for do-nothing.
     equivalent to: lambda x: x"""
     return x
 
@@ -590,31 +680,34 @@ imagenet_stats = A([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 """Statistics pertaining to image data from image net. mean and std of the images of each color channel"""
 inception_stats = A([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 inception_models = (inception_4, inceptionresnet_2)
-"""pretrained pytorch inception models"""
 
 def tfms_from_stats(stats, sz, aug_tfms=None, max_zoom=None, pad=0, crop_type=CropType.RANDOM,
+                    min_area_frac=0.08, min_aspect_ratio=0.75, max_aspect_ratio=1.333, flip_hw_p=0.5,
                     tfm_y=None, sz_y=None, pad_mode=cv2.BORDER_REFLECT):
-    """ Given the statistics of the traning image sets, returns seperate traning and valication transform functions
+    """ Given the statistics of the training image sets, returns separate training and validation transform functions
     """
     if aug_tfms is None: aug_tfms=[]
     tfm_norm = Normalize(*stats, tfm_y=tfm_y)
     tfm_denorm = Denormalize(*stats)
-    val_crop = CropType.CENTER if crop_type==CropType.RANDOM else crop_type
+    val_crop = CropType.CENTER if crop_type in (CropType.RANDOM,CropType.GOOGLENET) else crop_type
     val_tfm = image_gen(tfm_norm, tfm_denorm, sz, pad=pad, crop_type=val_crop, tfm_y=tfm_y, sz_y=sz_y)
-    trn_tfm=image_gen(tfm_norm, tfm_denorm, sz, tfms=aug_tfms, max_zoom=max_zoom,
-                      pad=pad, crop_type=crop_type, tfm_y=tfm_y, sz_y=sz_y, pad_mode=pad_mode)
+    trn_tfm = image_gen(tfm_norm, tfm_denorm, sz, pad=pad, crop_type=crop_type, 
+                        min_area_frac=min_area_frac, min_aspect_ratio=min_aspect_ratio, max_aspect_ratio=max_aspect_ratio, flip_hw_p=flip_hw_p,
+                        tfm_y=tfm_y, sz_y=sz_y, tfms=aug_tfms, max_zoom=max_zoom, pad_mode=pad_mode)
     return trn_tfm, val_tfm
 
 
 def tfms_from_model(f_model, sz, aug_tfms=None, max_zoom=None, pad=0, crop_type=CropType.RANDOM,
+                    min_area_frac=0.08, min_aspect_ratio=0.75, max_aspect_ratio=1.333, flip_hw_p=0.5,
                     tfm_y=None, sz_y=None, pad_mode=cv2.BORDER_REFLECT):
-    """ Returns seperate transformers of images for traning and validation.
+    """ Returns separate transformers of images for training and validation.
     Transformers are constructed according to the image statistics given b y the model. (See tfms_from_stats)
-    
+
     Arguments:
         f_model: model, pretrained or not pretrained
     """
     stats = inception_stats if f_model in inception_models else imagenet_stats
     return tfms_from_stats(stats, sz, aug_tfms, max_zoom=max_zoom, pad=pad, crop_type=crop_type,
-                       tfm_y=tfm_y, sz_y=sz_y, pad_mode=pad_mode)
+                           min_area_frac=min_area_frac, min_aspect_ratio=min_aspect_ratio, max_aspect_ratio=max_aspect_ratio, flip_hw_p=flip_hw_p,
+                           tfm_y=tfm_y, sz_y=sz_y, pad_mode=pad_mode)
 
