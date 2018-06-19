@@ -15,17 +15,17 @@ class PassthruDataset(Dataset):
     def __getitem__(self, idx): return [o[idx] for o in self.xs] + [self.y[idx]]
 
     @classmethod
-    def from_data_frame(self, df, cols_x, col_y, is_reg=True, is_multi=False):
+    def from_data_frame(cls, df, cols_x, col_y, is_reg=True, is_multi=False):
         cols = [df[o] for o in cols_x+[col_y]]
-        return self(*cols, is_reg=is_reg, is_multi=is_multi)
+        return cls(*cols, is_reg=is_reg, is_multi=is_multi)
 
 
 class ColumnarDataset(Dataset):
     def __init__(self, cats, conts, y, is_reg, is_multi):
         n = len(cats[0]) if cats else len(conts[0])
-        self.cats = np.stack(cats, 1).astype(np.int64) if cats else np.zeros((n,1))
+        self.cats  = np.stack(cats,  1).astype(np.int64)   if cats  else np.zeros((n,1))
         self.conts = np.stack(conts, 1).astype(np.float32) if conts else np.zeros((n,1))
-        self.y = np.zeros((n,1)) if y is None else y
+        self.y     = np.zeros((n,1))                       if y is None else y
         if is_reg:
             self.y =  self.y[:,None]
         self.is_reg = is_reg
@@ -63,9 +63,10 @@ class ColumnarModelData(ModelData):
 
     @classmethod
     def from_data_frames(cls, path, trn_df, val_df, trn_y, val_y, cat_flds, bs, is_reg, is_multi, test_df=None):
-        test_ds = ColumnarDataset.from_data_frame(test_df, cat_flds, None, is_reg, is_multi) if test_df is not None else None
-        return cls(path, ColumnarDataset.from_data_frame(trn_df, cat_flds, trn_y, is_reg, is_multi),
-                    ColumnarDataset.from_data_frame(val_df, cat_flds, val_y, is_reg, is_multi), bs, test_ds=test_ds)
+        trn_ds  = ColumnarDataset.from_data_frame(trn_df,  cat_flds, trn_y, is_reg, is_multi)
+        val_ds  = ColumnarDataset.from_data_frame(val_df,  cat_flds, val_y, is_reg, is_multi)
+        test_ds = ColumnarDataset.from_data_frame(test_df, cat_flds, None,  is_reg, is_multi) if test_df is not None else None
+        return cls(path, trn_ds, val_ds, bs, test_ds=test_ds)
 
     @classmethod
     def from_data_frame(cls, path, val_idxs, df, y, cat_flds, bs, is_reg=True, is_multi=False, test_df=None):
@@ -137,15 +138,12 @@ class MixedInputModel(nn.Module):
 class StructuredLearner(Learner):
     def __init__(self, data, models, **kwargs):
         super().__init__(data, models, **kwargs)
-        if data.is_reg:
-            self.crit = F.mse_loss
-        elif data.is_multi:
-            self.crit = F.binary_cross_entropy
-        else:
-            self.crit = F.nll_loss
+
+    def _get_crit(self, data): return F.mse_loss if data.is_reg else F.binary_cross_entropy if data.is_multi else F.nll_loss
 
     def summary(self):
-        return model_summary(self.model, [(self.data.trn_ds.cats.shape[1], ), (self.data.trn_ds.conts.shape[1], )])
+        x = [torch.ones(3, self.data.trn_ds.cats.shape[1], dtype=torch.int64), torch.rand(3, self.data.trn_ds.conts.shape[1])]
+        return model_summary(self.model, x)
 
 
 class StructuredModel(BasicModel):
@@ -197,6 +195,7 @@ def get_emb(ni,nf):
     e.weight.data.uniform_(-0.05,0.05)
     return e
 
+
 class EmbeddingDotBias(nn.Module):
     def __init__(self, n_factors, n_users, n_items, min_score, max_score):
         super().__init__()
@@ -210,10 +209,15 @@ class EmbeddingDotBias(nn.Module):
         res = um.sum(1) + self.ub(users).squeeze() + self.ib(items).squeeze()
         return F.sigmoid(res) * (self.max_score-self.min_score) + self.min_score
 
+
 class CollabFilterLearner(Learner):
     def __init__(self, data, models, **kwargs):
         super().__init__(data, models, **kwargs)
-        self.crit = F.mse_loss
+
+    def _get_crit(self, data): return F.mse_loss
+
+    def summary(self): return model_summary(self.model, [torch.ones(3, dtype=torch.int64), torch.ones(3, dtype=torch.int64)])
+
 
 class CollabFilterModel(BasicModel):
     def get_layer_groups(self): return self.model

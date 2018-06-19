@@ -30,8 +30,8 @@ class ConvnetBuilder():
 
     def __init__(self, f, c, is_multi, is_reg, ps=None, xtra_fc=None, xtra_cut=0, custom_head=None, pretrained=True):
         self.f,self.c,self.is_multi,self.is_reg,self.xtra_cut = f,c,is_multi,is_reg,xtra_cut
-        if ps is None: ps = [0.25,0.5]
         if xtra_fc is None: xtra_fc = [512]
+        if ps is None: ps = [0.25]*len(xtra_fc) + [0.5]
         self.ps,self.xtra_fc = ps,xtra_fc
 
         if f in model_meta: cut,self.lr_cut = model_meta[f]
@@ -95,14 +95,16 @@ class ConvLearner(Learner):
     def __init__(self, data, models, precompute=False, **kwargs):
         self.precompute = False
         super().__init__(data, models, **kwargs)
-        if hasattr(data, 'is_multi'):
-            self.crit = F.binary_cross_entropy if data.is_multi else F.nll_loss
-            if data.is_reg: self.crit = F.l1_loss
-            elif self.metrics is None:
-                self.metrics = [accuracy_thresh(0.5)] if self.data.is_multi else [accuracy]
+        if hasattr(data, 'is_multi') and not data.is_reg and self.metrics is None:
+            self.metrics = [accuracy_thresh(0.5)] if self.data.is_multi else [accuracy]
         if precompute: self.save_fc1()
         self.freeze()
         self.precompute = precompute
+
+    def _get_crit(self, data):
+        if not hasattr(data, 'is_multi'): return super()._get_crit(data)
+
+        return F.l1_loss if data.is_reg else F.binary_cross_entropy if data.is_multi else F.nll_loss
 
     @classmethod
     def pretrained(cls, f, data, ps=None, xtra_fc=None, xtra_cut=0, custom_head=None, precompute=False,
@@ -111,6 +113,15 @@ class ConvLearner(Learner):
             ps=ps, xtra_fc=xtra_fc, xtra_cut=xtra_cut, custom_head=custom_head, pretrained=pretrained)
         return cls(data, models, precompute, **kwargs)
 
+    @classmethod
+    def lsuv_learner(cls, f, data, ps=None, xtra_fc=None, xtra_cut=0, custom_head=None, precompute=False,
+                  needed_std=1.0, std_tol=0.1, max_attempts=10, do_orthonorm=False, **kwargs):
+        models = ConvnetBuilder(f, data.c, data.is_multi, data.is_reg,
+            ps=ps, xtra_fc=xtra_fc, xtra_cut=xtra_cut, custom_head=custom_head, pretrained=False)
+        convlearn=cls(data, models, precompute, **kwargs)
+        convlearn.lsuv_init()
+        return convlearn
+    
     @property
     def model(self): return self.models.fc_model if self.precompute else self.models.model
 

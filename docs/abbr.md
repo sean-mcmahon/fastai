@@ -52,6 +52,7 @@ Note that there are always exceptions, especially when we try to comply with the
 |                  | input                               | x              |                                                  |
 |                  | input / output                      | io             |                                                  |
 |                  | object                              | obj            |                                                  |
+|                  | string                              | s              |                                                  |
 |                  | class                               | cls            |                                                  |
 |                  | source                              | src            |                                                  |
 |                  | destination                         | dst            |                                                  |
@@ -67,6 +68,7 @@ Note that there are always exceptions, especially when we try to comply with the
 |                  | threshold                           | thresh         |                                                  |
 | **Data**         |                                     |                |                                                  |
 |                  | number of elements                  | n              |                                                  |
+|                  | number of batches                   | nb             |                                                  |
 |                  | length                              | len            |                                                  |
 |                  | size                                | sz             |                                                  |
 |                  | array                               | arr            | label_arr                                        |
@@ -131,7 +133,6 @@ Note that there are always exceptions, especially when we try to comply with the
 |                  | criteria                            | crit           |                                                  |
 |                  | weight decay                        | wd             |                                                  |
 |                  | momentum                            | mom            |                                                  |
-|                  | back propagation through time       | bptt           |                                                  |
 |                  | cross validation                    | cv             |                                                  |
 |                  | learning rate                       | lr             |                                                  |
 |                  | schedule                            | sched          |                                                  |
@@ -143,8 +144,7 @@ Note that there are always exceptions, especially when we try to comply with the
 |                  | figure                              | fig            |                                                  |
 |                  | image                               | im             |                                                  |
 |                  | transform image using opencv        | _cv            | zoom_cv(), rotate_cv(), stretch_cv()             |
-| **Text**         |                                     |                |                                                  |
-|                  | string                              | s              |                                                  |
-|                  | natural language processing         | nlp            |                                                  |
+| **NLP**          | natural language processing (nlp)   |                |                                                  |
 |                  | token                               | tok            |                                                  |
 |                  | sequence length                     | sl             |                                                  |
+|                  | back propagation through time       | bptt           |                                                  |
