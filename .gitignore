@@ -132,3 +132,8 @@ examples/fastai
 
 # Images
 *.png
+
+# HPC Jobs
+*.e3*
+*.o3*
+param_files/
