@@ -16,7 +16,7 @@ Currently, there are two ways to install fastai-0.7.x: (1) via conda from git so
 
    **1a.** First, create the `fastai` conda environment. It will install all the dependencies that are needed. Do it only once:
    ```
-   git clone https://github.com/fastai/fastai.git
+   git clone https://github.com/sean-mcmahon/fastai
    cd fastai
    conda env create -f environment.yml
    ```
