@@ -26,7 +26,7 @@ Currently, there are two ways to install fastai-0.7.x: (1) via conda from git so
    ```
    If you don't have GPU, build the `fastai-cpu` environment instead:
    ```
-   git clone https://github.com/fastai/fastai.git
+   git clone https://github.com/sean-mcmahon/fastai
    cd fastai
    conda env create -f environment-cpu.yml
    ```
